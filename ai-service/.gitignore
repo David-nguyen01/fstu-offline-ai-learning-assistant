@@ -1,0 +1,42 @@
+# Python environments and caches
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Generated data, models, and reports
+data/raw/
+data/processed/
+data/db/
+data/models_cache/
+data/corpus/
+data/research/
+models/
+reports/
+logs/
+output/
+*.sqlite
+*.sqlite3
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.log
+
+# Packaging and editors
+build/
+dist/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

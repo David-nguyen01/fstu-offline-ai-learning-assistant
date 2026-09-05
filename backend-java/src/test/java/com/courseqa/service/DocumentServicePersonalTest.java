@@ -1,0 +1,276 @@
+package com.courseqa.service;
+
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.courseqa.model.dto.DocumentDto;
+import com.courseqa.model.entity.Course;
+import com.courseqa.model.entity.CourseDocument;
+import com.courseqa.model.entity.CourseWorkspace;
+import com.courseqa.model.entity.DocumentChunk;
+import com.courseqa.model.entity.SemesterWorkspace;
+import com.courseqa.model.entity.SubscriptionPlan;
+import com.courseqa.model.entity.User;
+import com.courseqa.model.entity.UserRole;
+import com.courseqa.repository.ChapterRepository;
+import com.courseqa.repository.CourseDocumentRepository;
+import com.courseqa.repository.CourseRepository;
+import com.courseqa.repository.CourseWorkspaceRepository;
+import com.courseqa.repository.DocumentChapterRangeRepository;
+import com.courseqa.repository.DocumentChapterSuggestionRepository;
+import com.courseqa.repository.DocumentChunkRepository;
+import com.courseqa.repository.DocumentPageRepository;
+import com.courseqa.repository.SemesterWorkspaceRepository;
+import com.courseqa.repository.UserRepository;
+import com.courseqa.repository.UserRoleRepository;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.time.LocalDateTime;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.server.ResponseStatusException;
+
+class DocumentServicePersonalTest {
+    private final CourseDocumentRepository documents = mock(CourseDocumentRepository.class);
+    private final CourseRepository courses = mock(CourseRepository.class);
+    private final CourseWorkspaceRepository workspaces = mock(CourseWorkspaceRepository.class);
+    private final DocumentChunkRepository chunks = mock(DocumentChunkRepository.class);
+    private final UserRepository users = mock(UserRepository.class);
+    private final UserRoleRepository roles = mock(UserRoleRepository.class);
+    private final SemesterWorkspaceRepository semesters = mock(SemesterWorkspaceRepository.class);
+    private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+    private final SubscriptionService subscriptions = mock(SubscriptionService.class);
+    private final CloudAssetCleanupService cloudAssetCleanup = mock(CloudAssetCleanupService.class);
+    private DocumentService service;
+
+    @BeforeEach
+    void setUp() {
+        service = new DocumentService(
+                documents,
+                courses,
+                mock(ChapterRepository.class),
+                workspaces,
+                mock(DocumentPageRepository.class),
+                chunks,
+                users,
+                roles,
+                semesters,
+                mock(DocumentChapterRangeRepository.class),
+                mock(DocumentChapterSuggestionRepository.class),
+                jdbcTemplate,
+                mock(PersonalWorkspaceService.class),
+                subscriptions,
+                cloudAssetCleanup,
+                "uploads",
+                "",
+                "",
+                "",
+                "",
+                "vie+eng", 60,
+                new ChunkTokenCounter("", false), disabledSemantics(), 450, 55, 250, 40);
+        when(documents.save(any(CourseDocument.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        SubscriptionPlan free = new SubscriptionPlan();
+        free.setPlanCode("FREE");
+        free.setMaxFileBytes(10L * 1024 * 1024);
+        free.setMaxDocuments(10);
+        free.setMaxStorageBytes(100L * 1024 * 1024);
+        free.setMaxPersonalWorkspaces(1);
+        when(subscriptions.effectivePlanForQuota(any(UUID.class))).thenReturn(free);
+    }
+
+    @Test
+    void submitAndApproveMovesTheSameDocumentAndChunksToCourseWorkspace() {
+        UUID ownerId = UUID.randomUUID();
+        UUID adminId = UUID.randomUUID();
+        UUID documentId = UUID.randomUUID();
+        UUID courseId = UUID.randomUUID();
+        UUID semesterId = UUID.randomUUID();
+        UUID courseWorkspaceId = UUID.randomUUID();
+
+        CourseDocument document = new CourseDocument();
+        document.setDocumentId(documentId);
+        document.setUploadedBy(ownerId);
+        document.setDocumentScope("PERSONAL");
+        document.setReviewStatus("NOT_SUBMITTED");
+        document.setProcessingStatus("PROCESSED");
+
+        Course course = new Course();
+        course.setCourseId(courseId);
+        course.setSemesterWorkspaceId(semesterId);
+        course.setStatus("DRAFT");
+        course.setIsActive(true);
+        SemesterWorkspace semester = new SemesterWorkspace();
+        semester.setStatus("ACTIVE");
+        CourseWorkspace workspace = new CourseWorkspace();
+        workspace.setWorkspaceId(courseWorkspaceId);
+        workspace.setCourseId(courseId);
+        workspace.setIsActive(true);
+        DocumentChunk chunk = new DocumentChunk();
+        chunk.setChunkId(UUID.randomUUID());
+        chunk.setDocumentId(documentId);
+
+        when(users.existsById(ownerId)).thenReturn(true);
+        when(users.existsById(adminId)).thenReturn(true);
+        when(documents.findById(documentId)).thenReturn(Optional.of(document));
+        when(courses.findById(courseId)).thenReturn(Optional.of(course));
+        when(semesters.findById(semesterId)).thenReturn(Optional.of(semester));
+        when(workspaces.findByCourseIdOrderByCreatedAtDesc(courseId)).thenReturn(List.of(workspace));
+        when(chunks.findByDocumentIdOrderByChunkIndexAsc(documentId)).thenReturn(List.of(chunk));
+        UserRole adminRole = new UserRole();
+        adminRole.setRoleName("ADMIN");
+        when(roles.findByUserIdAndIsActiveTrue(adminId)).thenReturn(List.of(adminRole));
+
+        DocumentDto.DocumentResponse submitted = service.submitForReview(documentId, courseId, ownerId);
+        assertEquals("PENDING", submitted.reviewStatus);
+
+        DocumentDto.ReviewRequest review = new DocumentDto.ReviewRequest();
+        review.status = "APPROVED";
+        review.courseId = courseId;
+        DocumentDto.DocumentResponse approved = service.reviewDocument(documentId, review, adminId);
+
+        assertEquals(documentId, approved.documentId);
+        assertEquals("COURSE", approved.documentScope);
+        assertEquals("APPROVED", approved.reviewStatus);
+        assertEquals(courseWorkspaceId, approved.workspaceId);
+        assertSame(chunk, chunks.findByDocumentIdOrderByChunkIndexAsc(documentId).get(0));
+        assertEquals(courseWorkspaceId, chunk.getWorkspaceId());
+        assertEquals(courseId, chunk.getCourseId());
+        verify(chunks).saveAll(List.of(chunk));
+    }
+
+    @Test
+    void documentListIncludesUploadDateAndUploaderNameWithOneBatchLookup() {
+        UUID ownerId = UUID.randomUUID();
+        LocalDateTime uploadedAt = LocalDateTime.of(2026, 7, 27, 10, 30);
+        CourseDocument document = new CourseDocument();
+        document.setDocumentId(UUID.randomUUID());
+        document.setUploadedBy(ownerId);
+        document.setUploadedAt(uploadedAt);
+        document.setDocumentScope("PERSONAL");
+        document.setReviewStatus("NOT_SUBMITTED");
+
+        User uploader = new User();
+        uploader.setUserId(ownerId);
+        uploader.setFullName("Nguyen Van A");
+
+        when(users.existsById(ownerId)).thenReturn(true);
+        when(documents.findByUploadedByOrderByUploadedAtDesc(ownerId)).thenReturn(List.of(document));
+        when(users.findAllById(any())).thenReturn(List.of(uploader));
+
+        List<DocumentDto.DocumentResponse> response = service.getMyDocuments(ownerId);
+
+        assertEquals(1, response.size());
+        assertEquals(uploadedAt, response.get(0).uploadedAt);
+        assertEquals("Nguyen Van A", response.get(0).uploaderName);
+        verify(users).findAllById(any());
+    }
+
+    @Test
+    void adminDeleteDetachesDocumentFromEvaluationDatasetsBeforeRemovingIt() {
+        UUID adminId = UUID.randomUUID();
+        UUID documentId = UUID.randomUUID();
+
+        CourseDocument document = new CourseDocument();
+        document.setDocumentId(documentId);
+        document.setStorageProvider("LOCAL");
+        document.setFilePath("uploads/deleted-document.pdf");
+
+        UserRole adminRole = new UserRole();
+        adminRole.setRoleName("ADMIN");
+
+        when(users.existsById(adminId)).thenReturn(true);
+        when(documents.findById(documentId)).thenReturn(Optional.of(document));
+        when(roles.findByUserIdAndIsActiveTrue(adminId)).thenReturn(List.of(adminRole));
+
+        service.deleteDocument(documentId, adminId);
+
+        verify(jdbcTemplate).update(
+                contains("UPDATE evaluation_questions SET expected_document_id = NULL"),
+                eq(documentId));
+        verify(jdbcTemplate).update(
+                contains("DELETE FROM evaluation_dataset_documents"),
+                eq(documentId));
+        verify(documents).delete(document);
+        verify(documents).flush();
+    }
+
+    @Test
+    void deletingACloudDocumentQueuesBothOriginalAndPreviewForReliableCleanup() {
+        UUID adminId = UUID.randomUUID();
+        UUID documentId = UUID.randomUUID();
+
+        CourseDocument document = new CourseDocument();
+        document.setDocumentId(documentId);
+        document.setStorageProvider("CLOUDINARY");
+        document.setCloudinarySecureUrl("https://res.cloudinary.com/example/raw/upload/original");
+        document.setCloudinaryPublicId("courseqa/documents/original");
+        document.setCloudinaryPreviewPublicId("courseqa/previews/preview.pdf");
+
+        UserRole adminRole = new UserRole();
+        adminRole.setRoleName("ADMIN");
+        when(users.existsById(adminId)).thenReturn(true);
+        when(documents.findById(documentId)).thenReturn(Optional.of(document));
+        when(roles.findByUserIdAndIsActiveTrue(adminId)).thenReturn(List.of(adminRole));
+
+        service.deleteDocument(documentId, adminId);
+
+        verify(cloudAssetCleanup).enqueueRaw("courseqa/documents/original");
+        verify(cloudAssetCleanup).enqueueRaw("courseqa/previews/preview.pdf");
+        verify(documents).delete(document);
+        verify(documents).flush();
+    }
+
+    @Test
+    void aFileWhoseBytesDoNotMatchItsExtensionIsRejectedBeforeAnythingParsesIt() throws Exception {
+        UUID ownerId = UUID.randomUUID();
+        UUID workspaceId = UUID.randomUUID();
+        CourseWorkspace personal = new CourseWorkspace();
+        personal.setWorkspaceId(workspaceId);
+        personal.setOwnerUserId(ownerId);
+        personal.setVisibility("PRIVATE");
+        when(users.existsById(ownerId)).thenReturn(true);
+        when(workspaces.findById(workspaceId)).thenReturn(Optional.of(personal));
+        when(documents.sumUsableFileSizeByUploadedByAndDocumentScope(ownerId, "PERSONAL")).thenReturn(0L);
+
+        // Anyone can name a file ".pdf"; only the leading bytes say what it is.
+        Path staged = Files.createTempFile("staged", ".tmp");
+        Files.write(staged, "MZ this is a windows executable".getBytes(StandardCharsets.UTF_8));
+
+        try {
+            assertThatThrownBy(() -> service.registerStagedUpload(
+                    staged, "giaotrinh.pdf", "application/pdf", workspaceId, null, null, ownerId))
+                    .isInstanceOf(ResponseStatusException.class)
+                    .hasMessageContaining("not a valid PDF file");
+            verify(documents, org.mockito.Mockito.never()).save(any(CourseDocument.class));
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+    }
+
+    @Test
+    void personalDocumentCountLimitIsActuallyEnforced() {
+        UUID ownerId = UUID.randomUUID();
+        when(documents.countUsableByUploadedByAndDocumentScope(ownerId, "PERSONAL")).thenReturn(10L);
+
+        assertThatThrownBy(() -> service.validatePersonalQuota("giaotrinh.pdf", 1024L, ownerId))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("at most 10 personal documents");
+    }
+
+    /** Structural chunking only: semantic mode is opt-in and needs a live model. */
+    private static SemanticBoundaryDetector disabledSemantics() {
+        return new SemanticBoundaryDetector(mock(EmbeddingService.class), false, 0.62, 4000);
+    }
+}
